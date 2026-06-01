@@ -97,12 +97,14 @@ type FullSender interface {
 	SendFull(ctx context.Context, req *SendRequest) (*SendResult, error)
 }
 
-// --- Singleton ---
+// --- Singletons ---
 
 var (
-	instance *PostmarkSender
-	once     sync.Once
-	deliver  bool
+	instance    *PostmarkSender
+	once        sync.Once
+	sesInstance *SESSender
+	sesOnce     sync.Once
+	deliver     bool
 )
 
 func init() {
@@ -135,9 +137,42 @@ func Default() *PostmarkSender {
 	return instance
 }
 
-// DefaultSender returns a Sender, falling back to LogSender if no provider is configured.
-// The PostmarkSender itself checks DELIVER_MAIL and logs instead of sending in dev mode.
+// defaultSES returns the shared SESSender (or nil if not configured).
+func defaultSES() *SESSender {
+	sesOnce.Do(func() {
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = os.Getenv("AWS_DEFAULT_REGION")
+		}
+		from := os.Getenv("MAIL_FROM_ADDRESS")
+		if from == "" {
+			from = "noreply@tinycld.org"
+		}
+		if region == "" {
+			return
+		}
+		s, err := NewSESSender(SESConfig{
+			Region:          region,
+			AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			DefaultFrom:     from,
+		})
+		if err == nil {
+			sesInstance = s
+		}
+	})
+	return sesInstance
+}
+
+// DefaultSender returns a Sender based on MAIL_PROVIDER, falling back to
+// LogSender when no provider is configured.
 func DefaultSender() Sender {
+	if os.Getenv("MAIL_PROVIDER") == "ses" {
+		if s := defaultSES(); s != nil {
+			return s
+		}
+		return &LogSender{}
+	}
 	s := Default()
 	if s == nil {
 		return &LogSender{}
